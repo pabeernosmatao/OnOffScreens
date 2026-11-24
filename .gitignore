@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+src/assets/out/
+
+# Release artifacts (published through GitHub Releases)
+release/*.AppImage
+release/*.sha256
+
+# Logs and local tooling
+*.log
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo

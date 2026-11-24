@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Perfiles de pantalla
+GenericName=Perfiles de pantalla
+Comment=Encender y apagar monitores por perfiles
+Exec=__EXEC__ menu
+Icon=pantallas-perfiles
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=pantalla;pantallas;monitor;monitores;perfil;perfiles;display;screen;
+StartupNotify=false

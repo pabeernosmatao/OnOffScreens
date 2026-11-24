@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=pantallas (perfiles de pantalla)
+Comment=Icono de perfiles de pantalla en la bandeja
+Exec=__EXEC__ tray
+Icon=pantallas-perfiles
+X-KDE-autostart-after=panel
+X-KDE-autostart-phase=2
+Terminal=false
+NoDisplay=true

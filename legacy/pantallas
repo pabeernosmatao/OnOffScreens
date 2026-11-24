@@ -1,0 +1,717 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+pantallas — perfiles de monitores para KDE Plasma (Wayland y X11).
+
+Detecta las pantallas automáticamente y les asigna un número estable
+(por EDID/UUID, así el número no cambia al cambiar de puerto o al
+reiniciar). Los perfiles se definen con esos números.
+
+Uso:
+    pantallas                  # estado actual
+    pantallas list             # lista los perfiles
+    pantallas apply "Perfil 1" # aplica un perfil (por nombre o por índice)
+    pantallas apply 2
+    pantallas mapa             # qué número es cada pantalla
+    pantallas reasignar        # recalcula los números (con todas encendidas)
+    pantallas init             # crea un perfiles.conf por defecto
+    pantallas menu             # menú gráfico (kdialog)
+    pantallas tray             # icono en la bandeja del sistema
+    pantallas edit             # editar el fichero de perfiles
+
+Requisitos: KDE Plasma con kscreen (kscreen-doctor), python3.
+Para la bandeja: python-gobject + libappindicator (AppIndicator3) y kdialog.
+"""
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+APP = "pantallas"
+ICON = "pantallas-perfiles"
+
+CONFIG = Path.home() / ".config" / "pantallas" / "perfiles.conf"
+STATE = (
+    Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    / "pantallas"
+    / "mapa.json"
+)
+
+AQUI = Path(__file__).resolve().parent
+ICONOS = AQUI / "iconos" / "flat"
+
+
+# --------------------------------------------------------------------------
+#  Idioma (se detecta del sistema; PANTALLAS_IDIOMA=es|en lo fuerza)
+# --------------------------------------------------------------------------
+def idioma_sistema():
+    for var in ("PANTALLAS_IDIOMA", "LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"):
+        valor = os.environ.get(var)
+        if not valor:
+            continue
+        codigo = valor.split(":")[0].split(".")[0].split("_")[0].split("-")[0].lower()
+        if len(codigo) == 2 and codigo.isalpha():
+            return codigo
+    return "es"
+
+
+IDIOMA = idioma_sistema()
+
+TEXTOS = {
+    "es": {
+        "err_kscreen": "No encuentro kscreen-doctor. Instala el paquete 'kscreen'.",
+        "err_kscreen_read": "Error leyendo la configuración de pantallas: {e}",
+        "warn_screen_num": "aviso: no hay pantalla número {n}",
+        "err_profile_empty": "El perfil no contiene ninguna pantalla conectada.",
+        "err_apply": "kscreen-doctor falló:\n{out}",
+        "cfg_header1": "# Perfiles de pantallas",
+        "cfg_header2": "# Formato:  Nombre del perfil = pantallas encendidas (números separados por comas)",
+        "cfg_header3": "# Los números se asignan solos según la posición; míralos con:  pantallas mapa",
+        "prof_all": "Todas",
+        "prof_only": "Solo la {num} ({out})",
+        "st_title": "Pantallas detectadas:",
+        "st_on": "ENCENDIDA",
+        "st_off": "apagada",
+        "st_current": "Perfil actual:",
+        "st_custom": "(personalizado)",
+        "col_num": "Número",
+        "col_out": "Salida",
+        "col_size": "Tamaño",
+        "col_state": "Estado",
+        "warn_off": "aviso: hay pantallas apagadas; para que la numeración sea correcta\n"
+        "       enciende todas y ejecuta:  pantallas reasignar",
+        "menu_title": "Perfiles de pantalla",
+        "menu_pick": "Elige un perfil:",
+        "tray_map_label": "Qué pantalla es cada número…",
+        "tray_pick": "Elegir con ventana…",
+        "tray_edit": "Editar perfiles…",
+        "tray_kcm": "Configuración de pantallas de KDE…",
+        "tray_quit": "Salir",
+        "tray_tip": "Perfiles de pantalla",
+        "notify_applied": "Perfil aplicado: {name}",
+        "notify_reload": "Perfiles recargados",
+        "msg_created": "Creado {path}",
+        "msg_reassigned": "Números recalculados según la disposición actual:",
+        "err_usage": "Uso: pantallas apply <nombre o número de perfil>",
+        "err_notfound": "Perfil no encontrado o ambiguo. Usa 'pantallas list'.",
+        "dlg_map_title": "Pantallas detectadas",
+        "help_short": "Uso: pantallas [orden]\n\n"
+        "  (sin orden)     estado y perfil actual\n"
+        "  list            lista los perfiles\n"
+        "  apply <n|nombre> aplica un perfil\n"
+        "  mapa            qué número es cada pantalla\n"
+        "  reasignar       recalcula los números (con todas encendidas)\n"
+        "  menu            selector con ventana (kdialog)\n"
+        "  tray            icono en la bandeja\n"
+        "  init            crea perfiles.conf por defecto\n"
+        "  edit            edita perfiles.conf\n",
+    },
+    "en": {
+        "err_kscreen": "Cannot find kscreen-doctor. Install the 'kscreen' package.",
+        "err_kscreen_read": "Error reading the display configuration: {e}",
+        "warn_screen_num": "warning: there is no screen number {n}",
+        "err_profile_empty": "The profile contains no connected screen.",
+        "err_apply": "kscreen-doctor failed:\n{out}",
+        "cfg_header1": "# Display profiles",
+        "cfg_header2": "# Format:  Profile name = screens to turn on (comma-separated numbers)",
+        "cfg_header3": "# Numbers are assigned automatically by position; see them with:  pantallas mapa",
+        "prof_all": "All",
+        "prof_only": "Only {num} ({out})",
+        "st_title": "Detected screens:",
+        "st_on": "ON",
+        "st_off": "off",
+        "st_current": "Current profile:",
+        "st_custom": "(custom)",
+        "col_num": "Number",
+        "col_out": "Output",
+        "col_size": "Size",
+        "col_state": "State",
+        "warn_off": "warning: some screens are off; for correct numbering turn\n"
+        "         them all on and run:  pantallas reasignar",
+        "menu_title": "Display profiles",
+        "menu_pick": "Choose a profile:",
+        "tray_map_label": "Which screen is which number…",
+        "tray_pick": "Choose in a window…",
+        "tray_edit": "Edit profiles…",
+        "tray_kcm": "KDE display settings…",
+        "tray_quit": "Quit",
+        "tray_tip": "Display profiles",
+        "notify_applied": "Profile applied: {name}",
+        "notify_reload": "Profiles reloaded",
+        "msg_created": "Created {path}",
+        "msg_reassigned": "Numbers recalculated from the current layout:",
+        "err_usage": "Usage: pantallas apply <profile name or number>",
+        "err_notfound": "Profile not found or ambiguous. Use 'pantallas list'.",
+        "dlg_map_title": "Detected screens",
+        "help_short": "Usage: pantallas [command]\n\n"
+        "  (no command)     current state and active profile\n"
+        "  list             list profiles\n"
+        "  apply <n|name>   apply a profile\n"
+        "  mapa             which number is each screen\n"
+        "  reasignar        recompute numbers (all screens on)\n"
+        "  menu             picker window (kdialog)\n"
+        "  tray             system tray icon\n"
+        "  init             create a default perfiles.conf\n"
+        "  edit             edit perfiles.conf\n",
+    },
+}
+
+
+def t(clave, **datos):
+    textos = TEXTOS.get(IDIOMA) or TEXTOS["en"]
+    plantilla = textos.get(clave, clave)
+    return plantilla.format(**datos) if datos else plantilla
+
+
+
+# --------------------------------------------------------------------------
+#  kscreen-doctor
+# --------------------------------------------------------------------------
+def kscreen_json():
+    try:
+        out = subprocess.run(
+            ["kscreen-doctor", "-j"], capture_output=True, text=True, check=True
+        ).stdout
+        return json.loads(out)
+    except FileNotFoundError:
+        sys.exit(t("err_kscreen"))
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+        sys.exit(t("err_kscreen_read", e=e))
+
+
+def outputs():
+    """dict nombre_salida -> datos (sin Writeback ni duplicados raros)"""
+    info = {}
+    for o in kscreen_json()["outputs"]:
+        name = o.get("name", "")
+        if not name or name.startswith("Writeback"):
+            continue
+        info[name] = o
+    return info
+
+
+def uuid_map():
+    """nombre_salida -> UUID estable derivado del EDID (de kscreen-doctor -o)"""
+    try:
+        txt = subprocess.run(
+            ["kscreen-doctor", "-o"], capture_output=True, text=True, check=True
+        ).stdout
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return {}
+    txt = re.sub(r"\x1b\[[0-9;]*m", "", txt)
+    res = {}
+    for line in txt.splitlines():
+        m = re.match(r"^Output:\s*\d+\s+(\S+)\s+([0-9a-fA-F-]{16,})", line)
+        if m:
+            res[m.group(1)] = m.group(2)
+    return res
+
+
+def logical_size(o):
+    w = o["size"]["width"]
+    h = o["size"]["height"]
+    s = o.get("scale") or 1
+    return round(w / s), round(h / s)
+
+
+def enabled_outputs():
+    return [n for n, o in outputs().items() if o.get("enabled")]
+
+
+# --------------------------------------------------------------------------
+#  Mapa estable de pantallas (número -> salida)
+# --------------------------------------------------------------------------
+def load_state():
+    try:
+        data = json.loads(STATE.read_text(encoding="utf-8"))
+        if isinstance(data.get("screens"), dict):
+            return data
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {"version": 1, "screens": {}}
+
+
+def save_state(state):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    STATE.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def orden_por_posicion(nombres, info):
+    """
+    Ordena las pantallas para numerarlas: primero la fila principal (la que
+    tiene más pantallas), de izquierda a derecha, y después el resto de filas
+    de arriba abajo. Así, en una disposición 3 abajo + 1 arriba, la de arriba
+    es el último número.
+    """
+    filas = {}
+    for n in nombres:
+        filas.setdefault(info[n]["pos"]["y"], []).append(n)
+
+    def ancho(fila):
+        return sum(logical_size(info[n])[0] for n in fila)
+
+    def clave(par):
+        _, fila = par
+        prioridad = min(info[n].get("priority", 99) for n in fila)
+        return (len(fila), ancho(fila), -prioridad)
+
+    principal = max(filas.items(), key=clave)[0]
+
+    orden = []
+    for n in sorted(filas[principal], key=lambda n: (info[n]["pos"]["x"], n)):
+        orden.append(n)
+    for y in sorted(filas):
+        if y == principal:
+            continue
+        for n in sorted(filas[y], key=lambda n: (info[n]["pos"]["x"], n)):
+            orden.append(n)
+    return orden
+
+
+def refresh_map(rebuild=False):
+    """devuelve {numero: salida}; crea o rehace el mapa estable"""
+    info = outputs()
+    uuids = uuid_map()
+    conectadas = [n for n, o in info.items() if o.get("connected", True)]
+
+    state = {"version": 1, "screens": {}} if rebuild else load_state()
+    pantallas = state["screens"]
+
+    # el nombre de la salida puede cambiar (otro puerto): se actualiza
+    for uuid, datos in pantallas.items():
+        for n in conectadas:
+            if uuids.get(n) == uuid:
+                datos["name"] = n
+
+    conocidas = {
+        uuids[n]: pantallas[uuids[n]]
+        for n in conectadas
+        if uuids.get(n) in pantallas
+    }
+
+    nuevas = [n for n in conectadas if uuids.get(n) and uuids[n] not in pantallas]
+    if nuevas:
+        usados = {d["num"] for d in pantallas.values()}
+        libre = 1
+        for n in orden_por_posicion(nuevas, info):
+            while libre in usados:
+                libre += 1
+            o = info[n]
+            w, h = logical_size(o)
+            pantallas[uuids[n]] = {
+                "num": libre,
+                "name": n,
+                "x": o["pos"]["x"],
+                "y": o["pos"]["y"],
+                "w": w,
+                "h": h,
+            }
+            usados.add(libre)
+
+    save_state(state)
+
+    mapa = {}
+    for uuid, d in pantallas.items():
+        if uuid in {uuids.get(n) for n in conectadas}:
+            mapa[d["num"]] = d["name"]
+    return dict(sorted(mapa.items()))
+
+
+def resolver(items, mapa, info):
+    """resuelve números y nombres de salida a nombres reales"""
+    res = []
+    for it in items:
+        if it.isdigit() and int(it) in mapa:
+            res.append(mapa[int(it)])
+        elif it in info:
+            res.append(it)
+        elif it.isdigit():
+            print(t("warn_screen_num", n=it), file=sys.stderr)
+    return res
+
+
+# --------------------------------------------------------------------------
+#  Colocación sin huecos
+# --------------------------------------------------------------------------
+def plan_layout(targets, state, info):
+    """
+    Coloca las pantallas objetivo conservando su disposición original
+    (filas arriba/abajo) pero sin huecos. Devuelve {salida: (x, y)}.
+    """
+    por_uuid = {d["name"]: d for d in state["screens"].values()}
+
+    filas = {}
+    for n in targets:
+        d = por_uuid.get(n)
+        if d:
+            x, y, w, h = d["x"], d["y"], d["w"], d["h"]
+        else:
+            o = info[n]
+            x, y = o["pos"]["x"], o["pos"]["y"]
+            w, h = logical_size(o)
+        filas.setdefault(y, []).append((x, w, h, n))
+
+    pos = {}
+    alto_total = 0
+    fila_y = []
+    for y in sorted(filas):
+        fila = sorted(filas[y], key=lambda t: t[0])
+        alto = max(f[2] for f in fila)
+        ancho = sum(f[1] for f in fila)
+        fila_y.append((fila, alto, ancho))
+        alto_total += alto
+
+    ancho_max = max((a for _, _, a in fila_y), default=0)
+    cursor_y = 0
+    for fila, alto, ancho in fila_y:
+        x = (ancho_max - ancho) // 2  # filas más estrechas, centradas
+        for _, w, _, n in fila:
+            pos[n] = (x, cursor_y)
+            x += w
+        cursor_y += alto
+    return pos
+
+
+def apply_profile(targets):
+    info = outputs()
+    conectadas = [n for n, o in info.items() if o.get("connected", True)]
+    state = load_state()
+
+    targets = [t for t in targets if t in conectadas]
+    if not targets:
+        sys.exit(t("err_profile_empty"))
+
+    pos = plan_layout(targets, state, info)
+
+    args = []
+    for name in conectadas:
+        if name not in targets:
+            args.append(f"output.{name}.disable")
+    for name, (x, y) in pos.items():
+        args += [f"output.{name}.position.{x},{y}", f"output.{name}.enable"]
+
+    res = subprocess.run(["kscreen-doctor", *args], capture_output=True, text=True)
+    if res.returncode != 0:
+        sys.exit(t("err_apply", out=f"{res.stdout}{res.stderr}"))
+
+    for _ in range(30):
+        if set(enabled_outputs()) == set(targets):
+            break
+        time.sleep(0.2)
+    return targets
+
+
+# --------------------------------------------------------------------------
+#  Perfiles
+# --------------------------------------------------------------------------
+def write_default_config(mapa):
+    CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    lineas = [f"{t('cfg_header1')}\n{t('cfg_header2')}\n{t('cfg_header3')}\n#\n"]
+    todos = ",".join(str(n) for n in sorted(mapa))
+    lineas.append(f"{t('prof_all'):<21} = {todos}\n")
+    for num, salida in sorted(mapa.items()):
+        nombre = t("prof_only", num=num, out=salida)
+        lineas.append(f"{nombre:<21} = {num}\n")
+    CONFIG.write_text("".join(lineas), encoding="utf-8")
+
+
+def load_profiles():
+    mapa = refresh_map()
+    info = outputs()
+
+    if not CONFIG.exists():
+        write_default_config(mapa)
+
+    perfiles = []
+    for raw in CONFIG.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        nombre, valor = line.split("=", 1)
+        items = [i.strip() for i in valor.replace(";", ",").split(",") if i.strip()]
+        objetivos = resolver(items, mapa, info)
+        if nombre.strip() and objetivos:
+            perfiles.append((nombre.strip(), objetivos))
+    return perfiles
+
+
+def perfil_actual(perfiles, mapa):
+    activas = set(enabled_outputs())
+    for nombre, objetivos in perfiles:
+        if set(objetivos) == activas:
+            return nombre
+    return None
+
+
+# --------------------------------------------------------------------------
+#  Salidas de texto
+# --------------------------------------------------------------------------
+def cmd_status(perfiles, mapa):
+    info = outputs()
+    print(t("st_title"))
+    for num, salida in mapa.items():
+        o = info.get(salida)
+        if not o:
+            continue
+        w, h = logical_size(o)
+        estado = t("st_on") if o.get("enabled") else t("st_off")
+        print(f"  {num}. {salida:<12} {estado:<10} {w}x{h}")
+    actual = perfil_actual(perfiles, mapa)
+    print("\n" + t("st_current"), actual or t("st_custom"))
+
+
+def cmd_list(perfiles, mapa):
+    actual = perfil_actual(perfiles, mapa)
+    for i, (nombre, objetivos) in enumerate(perfiles, 1):
+        marca = "●" if nombre == actual else " "
+        print(f"{marca} {i}. {nombre}   [{', '.join(objetivos)}]")
+
+
+def cmd_map(mapa):
+    info = outputs()
+    uuids = uuid_map()
+    print(
+        f"{t('col_num'):<8}{t('col_out'):<14}{'UUID':<10}"
+        f"{t('col_size'):<12}{t('col_state')}"
+    )
+    for num, salida in mapa.items():
+        o = info.get(salida, {})
+        w, h = logical_size(o) if o else (0, 0)
+        uid = (uuids.get(salida) or "")[:8]
+        estado = t("st_on") if o.get("enabled") else t("st_off")
+        print(f"  {num:<6}{salida:<14}{uid:<10}{w}x{h:<9}{estado}")
+
+
+def aviso_numeracion():
+    info = outputs()
+    conectadas = [n for n, o in info.items() if o.get("connected", True)]
+    encendidas = [n for n in conectadas if info[n].get("enabled")]
+    if len(encendidas) < len(conectadas):
+        print(t("warn_off"), file=sys.stderr)
+
+
+def cmd_menu(perfiles, mapa):
+    if not shutil.which("kdialog"):
+        sys.exit("kdialog no está instalado.")
+    items = []
+    for i, (nombre, _) in enumerate(perfiles, 1):
+        items += [str(i), nombre]
+    sel = subprocess.run(
+        ["kdialog", "--title", t("menu_title"), "--menu", t("menu_pick"), *items],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if sel.isdigit() and 1 <= int(sel) <= len(perfiles):
+        nombre, objetivos = perfiles[int(sel) - 1]
+        apply_profile(objetivos)
+        notify(t("notify_applied", name=nombre))
+
+
+def notify(msg):
+    if shutil.which("notify-send"):
+        subprocess.run(
+            ["notify-send", "-a", APP, "-i", ICON, "pantallas", msg], check=False
+        )
+
+
+# --------------------------------------------------------------------------
+#  Bandeja del sistema (AppIndicator / GTK3)
+# --------------------------------------------------------------------------
+def cmd_tray():
+    try:
+        import gi
+
+        gi.require_version("Gtk", "3.0")
+        gi.require_version("AppIndicator3", "0.1")
+        from gi.repository import AppIndicator3, Gio, GLib, Gtk
+    except (ImportError, ValueError):
+        sys.exit("Faltan librerías de bandeja: python-gobject y libappindicator.")
+
+    ind = AppIndicator3.Indicator.new(
+        ICON, ICON, AppIndicator3.IndicatorCategory.APPLICATION_STATUS
+    )
+    ind.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
+    if (ICONOS / f"{ICON}.png").exists():
+        ind.set_icon_theme_path(str(ICONOS))
+
+    st = {"items": {}, "updating": False, "reload_id": None}
+
+    def refresh():
+        try:
+            perfiles = load_profiles()
+            mapa = refresh_map()
+            cur = perfil_actual(perfiles, mapa)
+        except SystemExit:
+            return
+        st["updating"] = True
+        for nombre, item in st["items"].items():
+            item.set_active(nombre == cur)
+        st["updating"] = False
+        ind.set_title(f"{t('tray_tip')} — " + ", ".join(enabled_outputs()))
+
+    def on_toggle(nombre, objetivos):
+        def cb(item):
+            if st["updating"] or not item.get_active():
+                return
+            apply_profile(objetivos)
+            refresh()
+            notify(t("notify_applied", name=nombre))
+
+        return cb
+
+    def launch(cmd):
+        subprocess.Popen(cmd, start_new_session=True)
+        GLib.timeout_add_seconds(2, lambda: (refresh(), False)[1])
+
+    def ver_mapa():
+        try:
+            mapa = refresh_map()
+            info = outputs()
+            uuids = uuid_map()
+            lineas = []
+            for num, salida in mapa.items():
+                o = info.get(salida, {})
+                w, h = logical_size(o) if o else (0, 0)
+                est = t("st_on") if o.get("enabled") else t("st_off")
+                lineas.append(
+                    f"{num}.  {salida:<12} {w}x{h}  {est}   id {uuids.get(salida, '')[:8]}"
+                )
+            subprocess.Popen(
+                ["kdialog", "--title", t("dlg_map_title"), "--textbox",
+                 "\n".join(lineas)],
+                start_new_session=True,
+            )
+        except SystemExit:
+            pass
+
+    def build():
+        menu = Gtk.Menu()
+        st["items"] = {}
+        primero = None
+        for nombre, objetivos in load_profiles():
+            item = Gtk.RadioMenuItem(label=nombre, group=primero)
+            primero = primero or item
+            item.connect("toggled", on_toggle(nombre, objetivos))
+            menu.append(item)
+            st["items"][nombre] = item
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        i_mapa = Gtk.MenuItem(label=t("tray_map_label"))
+        i_mapa.connect("activate", lambda _: ver_mapa())
+        menu.append(i_mapa)
+
+        i_menu = Gtk.MenuItem(label=t("tray_pick"))
+        i_menu.connect("activate", lambda _: launch([sys.executable, __file__, "menu"]))
+        menu.append(i_menu)
+
+        i_edit = Gtk.MenuItem(label=t("tray_edit"))
+        i_edit.connect(
+            "activate",
+            lambda _: launch([shutil.which("kate") or "xdg-open", str(CONFIG)]),
+        )
+        menu.append(i_edit)
+
+        i_kcm = Gtk.MenuItem(label=t("tray_kcm"))
+        i_kcm.connect("activate", lambda _: launch(["kcmshell6", "kcm_kscreen"]))
+        menu.append(i_kcm)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        i_salir = Gtk.MenuItem(label=t("tray_quit"))
+        i_salir.connect("activate", lambda _: Gtk.main_quit())
+        menu.append(i_salir)
+
+        menu.show_all()
+        ind.set_menu(menu)
+        refresh()
+        return menu
+
+    def reload(*_):
+        if st["reload_id"]:
+            GLib.source_remove(st["reload_id"])
+        st["reload_id"] = GLib.timeout_add(400, do_reload)
+        return True
+
+    def do_reload():
+        st["reload_id"] = None
+        build()
+        notify(t("notify_reload"))
+        return False
+
+    def on_dir_changed(_mon, changed, other, _event):
+        nombres = {f.get_basename() for f in (changed, other) if f}
+        if CONFIG.name in nombres:
+            reload()
+
+    monitor = Gio.File.new_for_path(str(CONFIG.parent)).monitor_directory(
+        Gio.FileMonitorFlags.NONE, None
+    )
+    monitor.connect("changed", on_dir_changed)
+
+    build()
+    GLib.timeout_add_seconds(10, lambda: (refresh(), True)[1])
+    Gtk.main()
+
+
+# --------------------------------------------------------------------------
+#  main
+# --------------------------------------------------------------------------
+def main():
+    args = sys.argv[1:]
+    cmd = args[0] if args else "status"
+    mapa = refresh_map()
+    perfiles = load_profiles()
+
+    if cmd in ("status", "estado"):
+        cmd_status(perfiles, mapa)
+    elif cmd in ("list", "ls"):
+        cmd_list(perfiles, mapa)
+    elif cmd in ("mapa", "map"):
+        cmd_map(mapa)
+    elif cmd in ("apply", "aplicar"):
+        if len(args) < 2:
+            sys.exit(t("err_usage"))
+        buscado = args[1].strip().lower()
+        elegido = None
+        if buscado.isdigit() and 1 <= int(buscado) <= len(perfiles):
+            elegido = perfiles[int(buscado) - 1]
+        if not elegido:
+            exactos = [p for p in perfiles if p[0].lower() == buscado]
+            elegido = exactos[0] if len(exactos) == 1 else None
+        if not elegido:
+            parciales = [p for p in perfiles if buscado in p[0].lower()]
+            elegido = parciales[0] if len(parciales) == 1 else None
+        if not elegido:
+            sys.exit(t("err_notfound"))
+        apply_profile(elegido[1])
+        notify(t("notify_applied", name=elegido[0]))
+    elif cmd == "menu":
+        cmd_menu(perfiles, mapa)
+    elif cmd == "tray":
+        cmd_tray()
+    elif cmd == "init":
+        write_default_config(mapa)
+        print(t("msg_created", path=CONFIG))
+        cmd_map(mapa)
+        aviso_numeracion()
+    elif cmd in ("reasignar", "reassign"):
+        refresh_map(rebuild=True)
+        print(t("msg_reassigned"))
+        cmd_map(refresh_map())
+        aviso_numeracion()
+    elif cmd in ("edit", "editar"):
+        subprocess.Popen([shutil.which("kate") or "xdg-open", str(CONFIG)])
+    elif cmd in ("help", "-h", "--help"):
+        print(t("help_short"))
+    else:
+        print(t("help_short"))
+
+
+if __name__ == "__main__":
+    main()
