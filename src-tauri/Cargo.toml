@@ -3,7 +3,7 @@ name = "onoffscreens"
 version = "2.1.0"
 description = "Perfiles de monitores para KDE Plasma"
 authors = ["OnOffScreens"]
-license = "0BSD"
+license = "MIT"
 edition = "2021"
 rust-version = "1.77.2"
 

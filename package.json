@@ -4,6 +4,7 @@
   "version": "2.1.0",
   "type": "module",
   "description": "Perfiles de monitores para KDE Plasma",
+  "license": "MIT",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
