@@ -16,8 +16,8 @@
 
 OnOffScreens is a small **Rust + Tauri 2** application distributed as an
 **AppImage**. It detects your monitors, shows their real layout, and turns them on
-or off in groups ("profiles") so you can switch between desk, triple-screen,
-cinema, TV-only or sim-racing setups with one click — without unplugging cables.
+or off in groups ("profiles") so you can switch between the profiles you have
+created with one click — without unplugging cables.
 
 ![OnOffScreens main window](docs/onoffscreens-ventana.png)
 
@@ -207,7 +207,7 @@ when you open the window or run an action.
 ./OnOffScreens_2.1.0_amd64-full.AppImage                 # open the window
 ./OnOffScreens_2.1.0_amd64-full.AppImage --tray          # start in the tray only
 ./OnOffScreens_2.1.0_amd64-full.AppImage --list          # list profiles
-./OnOffScreens_2.1.0_amd64-full.AppImage --apply "Cine"  # apply by name
+./OnOffScreens_2.1.0_amd64-full.AppImage --apply "Work"  # apply by name
 ./OnOffScreens_2.1.0_amd64-full.AppImage --apply 2       # apply by index
 ./OnOffScreens_2.1.0_amd64-full.AppImage --status        # detected screens
 ./OnOffScreens_2.1.0_amd64-full.AppImage --renumber      # recompute numbering
